@@ -16,7 +16,7 @@ use crate::{
         StarredRepositoryProfile, SyncReport,
     },
     router::route_intent,
-    storage::RepositoryStore,
+    storage::{RepositoryStore, StarredSort, normalize_starred_sort},
 };
 
 pub struct GitSeek {
@@ -241,17 +241,24 @@ impl GitSeek {
         request: &SearchRequest,
         limit: usize,
     ) -> Result<Vec<RepositoryResult>> {
-        let full_names = self
-            .index
-            .search_full_names(&request.query, limit)
-            .unwrap_or_default();
-        let repos = if full_names.is_empty() {
-            self.store.text_search_starred(&request.query, limit)?
+        let sort = normalize_starred_sort(request.sort.as_deref());
+        let repos = if sort == StarredSort::Relevance {
+            let full_names = self
+                .index
+                .search_full_names(&request.query, limit)
+                .unwrap_or_default();
+            if full_names.is_empty() {
+                self.store
+                    .text_search_starred(&request.query, limit, request.sort.as_deref())?
+            } else {
+                self.store.find_by_full_names(&full_names)?
+            }
         } else {
-            self.store.find_by_full_names(&full_names)?
+            self.store
+                .text_search_starred(&request.query, limit, request.sort.as_deref())?
         };
 
-        let matches = repos
+        let mut repos = repos
             .into_iter()
             .filter(|repo| {
                 request.language.as_ref().is_none_or(|language| {
@@ -273,6 +280,11 @@ impl GitSeek {
                         .any(|repo_topic| repo_topic.eq_ignore_ascii_case(topic))
                 })
             })
+            .collect::<Vec<_>>();
+        sort_starred_records(&mut repos, request.sort.as_deref());
+
+        let matches = repos
+            .into_iter()
             .take(limit)
             .map(|repo| {
                 let mut result = repo.to_result(RepositorySource::Starred, false);
@@ -390,6 +402,34 @@ fn doctor_hints(has_token: bool) -> Vec<&'static str> {
         Vec::new()
     } else {
         vec!["Set GITHUB_TOKEN before sync or GitHub-wide search"]
+    }
+}
+
+fn sort_starred_records(repos: &mut [RepositoryRecord], sort: Option<&str>) {
+    match normalize_starred_sort(sort) {
+        StarredSort::StarredAt => repos.sort_by(|left, right| {
+            right
+                .starred_at
+                .cmp(&left.starred_at)
+                .then_with(|| right.stars.cmp(&left.stars))
+                .then_with(|| left.full_name.cmp(&right.full_name))
+        }),
+        StarredSort::Stars => repos.sort_by(|left, right| {
+            right
+                .stars
+                .cmp(&left.stars)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+                .then_with(|| left.full_name.cmp(&right.full_name))
+        }),
+        StarredSort::Updated => repos.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.stars.cmp(&left.stars))
+                .then_with(|| left.full_name.cmp(&right.full_name))
+        }),
+        StarredSort::Name => repos.sort_by_key(|repo| repo.full_name.to_ascii_lowercase()),
+        StarredSort::Relevance => {}
     }
 }
 
@@ -539,6 +579,7 @@ mod tests {
             description: None,
             language: Some("Rust".to_string()),
             stars: 10,
+            starred_at: None,
             topics: vec!["mcp".to_string()],
             source: RepositorySource::Starred,
             cache_hit: false,
@@ -553,6 +594,7 @@ mod tests {
             description: None,
             language: None,
             stars: 1,
+            starred_at: None,
             topics: Vec::new(),
             why_matched: Vec::new(),
             recommended_use: None,
@@ -607,6 +649,40 @@ mod tests {
         assert_eq!(profile.min_stars, 5_000);
     }
 
+    #[test]
+    fn sorts_starred_records_by_starred_at_desc() {
+        let mut repos = vec![
+            fixture_repo_with_starred_at(
+                "owner/older",
+                Some("Rust"),
+                &["rust"],
+                "2024-01-01T00:00:00Z",
+            ),
+            fixture_repo_with_starred_at(
+                "owner/newer",
+                Some("Rust"),
+                &["rust"],
+                "2026-01-01T00:00:00Z",
+            ),
+            fixture_repo_with_starred_at(
+                "owner/middle",
+                Some("Rust"),
+                &["rust"],
+                "2025-01-01T00:00:00Z",
+            ),
+        ];
+
+        sort_starred_records(&mut repos, Some("starred_at"));
+
+        assert_eq!(
+            repos
+                .iter()
+                .map(|repo| repo.full_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner/newer", "owner/middle", "owner/older"]
+        );
+    }
+
     fn fixture_repo(full_name: &str, language: Option<&str>, topics: &[&str]) -> RepositoryRecord {
         let (owner, name) = full_name.split_once('/').unwrap();
         RepositoryRecord {
@@ -633,5 +709,20 @@ mod tests {
             source: RepositorySource::Starred,
             readme: None,
         }
+    }
+
+    fn fixture_repo_with_starred_at(
+        full_name: &str,
+        language: Option<&str>,
+        topics: &[&str],
+        starred_at: &str,
+    ) -> RepositoryRecord {
+        let mut repo = fixture_repo(full_name, language, topics);
+        repo.starred_at = Some(
+            chrono::DateTime::parse_from_rfc3339(starred_at)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        repo
     }
 }

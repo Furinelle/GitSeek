@@ -156,9 +156,21 @@ impl RepositoryStore {
         Ok(repos)
     }
 
-    pub fn text_search_starred(&self, query: &str, limit: usize) -> Result<Vec<RepositoryRecord>> {
+    pub fn text_search_starred(
+        &self,
+        query: &str,
+        limit: usize,
+        sort: Option<&str>,
+    ) -> Result<Vec<RepositoryRecord>> {
         let like = format!("%{}%", query.to_ascii_lowercase());
-        let mut stmt = self.conn.prepare(
+        let order_by = match normalize_starred_sort(sort) {
+            StarredSort::StarredAt => "starred_at DESC, stars DESC",
+            StarredSort::Stars => "stars DESC, updated_at DESC",
+            StarredSort::Updated => "updated_at DESC, stars DESC",
+            StarredSort::Name => "lower(full_name) ASC",
+            StarredSort::Relevance => "stars DESC, updated_at DESC",
+        };
+        let sql = format!(
             r#"
             SELECT * FROM repositories
             WHERE source = 'starred'
@@ -169,10 +181,11 @@ impl RepositoryStore {
                 OR lower(language) LIKE ?1
                 OR lower(readme) LIKE ?1
               )
-            ORDER BY stars DESC, updated_at DESC
+            ORDER BY {order_by}
             LIMIT ?2
-            "#,
-        )?;
+            "#
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![like, limit as i64], row_to_repo)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to collect starred search rows")
@@ -205,6 +218,27 @@ impl RepositoryStore {
             params![cache_key, response_json, Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StarredSort {
+    Relevance,
+    StarredAt,
+    Stars,
+    Updated,
+    Name,
+}
+
+pub(crate) fn normalize_starred_sort(sort: Option<&str>) -> StarredSort {
+    match sort.unwrap_or("relevance").to_ascii_lowercase().as_str() {
+        "starred" | "starred_at" | "starred-at" | "created" => StarredSort::StarredAt,
+        "stars" | "stargazers" => StarredSort::Stars,
+        "updated" | "updated_at" | "updated-at" | "pushed" | "pushed_at" | "pushed-at" => {
+            StarredSort::Updated
+        }
+        "name" | "full_name" | "full-name" => StarredSort::Name,
+        _ => StarredSort::Relevance,
     }
 }
 

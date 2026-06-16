@@ -67,11 +67,23 @@ gitseek doctor
 gitseek serve
 gitseek sync stars
 gitseek search stars "rust mcp server"
+gitseek search stars "rust" --sort starred_at
 gitseek search github "rust mcp server"
 gitseek recommend "find rust mcp server examples"
 gitseek discover from-stars --min-stars 5000 --limit 10
 gitseek context modelcontextprotocol/rust-sdk
 ```
+
+`gitseek search stars` supports local sort modes:
+
+- `relevance` (default)
+- `starred_at`
+- `stars`
+- `updated`
+- `name`
+
+Run `gitseek sync stars` after upgrading from versions before `0.1.1` so the
+local SQLite store contains GitHub's real `starred_at` timestamps.
 
 ## MCP Tools
 

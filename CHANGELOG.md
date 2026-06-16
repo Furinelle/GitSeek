@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.1 - 2026-06-16
+
+### Fixed
+
+- Starred repository sync now requests GitHub's starred timestamp payload and stores the real `starred_at` value instead of using the local sync time.
+- `gitseek search stars --sort starred_at` now sorts local starred search results by actual collection time.
+- Explicit starred sort modes now use SQLite sorting over the full local match set instead of sorting only a Tantivy relevance-limited subset.
+
+### Changed
+
+- Starred repository results now include `starred_at` when available.
+
 ## 0.1.0 - 2026-06-13
 
 Initial MVP.

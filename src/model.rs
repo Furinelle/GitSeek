@@ -103,6 +103,7 @@ pub struct RepositoryResult {
     pub description: Option<String>,
     pub language: Option<String>,
     pub stars: u64,
+    pub starred_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub topics: Vec<String>,
     pub source: RepositorySource,
@@ -177,6 +178,7 @@ impl RepositoryRecord {
             description: self.description.clone(),
             language: self.language.clone(),
             stars: self.stars,
+            starred_at: self.starred_at,
             topics: self.topics.clone(),
             source,
             cache_hit,

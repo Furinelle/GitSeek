@@ -39,10 +39,13 @@ impl GitHubClient {
         let mut page = 1;
         let mut repos = Vec::new();
         loop {
-            let url = format!("https://api.github.com/user/starred?per_page=100&page={page}");
-            let page_items: Vec<GitHubRepo> = self
+            let url = format!(
+                "https://api.github.com/user/starred?sort=created&direction=desc&per_page=100&page={page}"
+            );
+            let page_items: Vec<GitHubStarredRepo> = self
                 .http
                 .get(&url)
+                .header(ACCEPT, "application/vnd.github.star+json")
                 .send()
                 .await
                 .with_context(|| format!("failed to fetch starred repositories page {page}"))?
@@ -60,9 +63,10 @@ impl GitHubClient {
                 if limit.is_some_and(|limit| repos.len() >= limit) {
                     return Ok(repos);
                 }
-                let mut record = item.into_record(RepositorySource::Starred);
+                let full_name = item.repo.full_name.clone();
+                let mut record = item.into_record();
                 if include_readme {
-                    record.readme = self.readme_excerpt(&record.full_name).await.ok();
+                    record.readme = self.readme_excerpt(&full_name).await.ok();
                     if record.readme.is_some() {
                         record.readme_fetched_at = Some(Utc::now());
                     }
@@ -165,6 +169,19 @@ struct GitHubReadme {
 }
 
 #[derive(Debug, Deserialize)]
+struct GitHubStarredRepo {
+    starred_at: DateTime<Utc>,
+    repo: GitHubRepo,
+}
+
+impl GitHubStarredRepo {
+    fn into_record(self) -> RepositoryRecord {
+        self.repo
+            .into_record(RepositorySource::Starred, Some(self.starred_at))
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct GitHubRepo {
     id: i64,
     name: String,
@@ -185,7 +202,11 @@ struct GitHubRepo {
 }
 
 impl GitHubRepo {
-    fn into_record(self, source: RepositorySource) -> RepositoryRecord {
+    fn into_record(
+        self,
+        source: RepositorySource,
+        starred_at: Option<DateTime<Utc>>,
+    ) -> RepositoryRecord {
         RepositoryRecord {
             github_id: self.id,
             owner: self.owner.login,
@@ -203,7 +224,7 @@ impl GitHubRepo {
             created_at: self.created_at,
             updated_at: self.updated_at,
             pushed_at: self.pushed_at,
-            starred_at: Some(Utc::now()),
+            starred_at,
             last_synced_at: Some(Utc::now()),
             readme_fetched_at: None,
             etag: None,
@@ -213,7 +234,7 @@ impl GitHubRepo {
     }
 
     fn into_result(self, cache_hit: bool) -> RepositoryResult {
-        self.into_record(RepositorySource::Github)
+        self.into_record(RepositorySource::Github, None)
             .to_result(RepositorySource::Github, cache_hit)
     }
 }
