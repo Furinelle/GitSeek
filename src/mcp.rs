@@ -5,7 +5,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, stdin, stdout};
 
 use crate::{
     GitSeek,
-    model::{ProfileDiscoveryRequest, SearchRequest},
+    model::{ProfileDiscoveryRequest, ProjectFitRequest, SearchRequest},
     service::repository_context,
 };
 
@@ -126,6 +126,16 @@ async fn call_tool(gitseek: &GitSeek, params: Option<Value>) -> std::result::Res
             )
             .map_err(|error| error.to_string())?
         }
+        "discover_starred_for_project" => {
+            let request: ProjectFitRequest = serde_json::from_value(arguments)
+                .map_err(|error| format!("invalid project-fit arguments: {error}"))?;
+            serde_json::to_value(
+                gitseek
+                    .discover_starred_for_project(request)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?
+        }
         "get_repository_context" => {
             let input: ContextInput = serde_json::from_value(arguments)
                 .map_err(|error| format!("invalid context arguments: {error}"))?;
@@ -171,6 +181,11 @@ fn tools() -> Vec<Value> {
             "discover_repositories_from_starred_profile",
             "Build an interest profile from local starred repositories, then recommend high-star GitHub-wide repositories the user may like.",
             profile_discovery_schema(),
+        ),
+        tool(
+            "discover_starred_for_project",
+            "Rank only locally starred tools for a project or need, with field-level lexical evidence. No GitHub or LLM calls. Supply explicit project metadata and already-used repository names; language alone never qualifies a candidate and stars never affect relevance.",
+            project_fit_schema(),
         ),
         tool(
             "get_repository_context",
@@ -242,6 +257,29 @@ fn context_schema() -> Value {
             "full_name": { "type": "string" },
             "source_hint": { "type": "string", "enum": ["starred", "github"] },
             "include_readme": { "type": "boolean", "default": true }
+        }
+    })
+}
+
+fn project_fit_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["target"],
+        "properties": {
+            "target": { "type": "string", "description": "owner/repo (needs context unless locally starred), or a short description of the need" },
+            "context": {
+                "type": "object",
+                "required": ["full_name"],
+                "properties": {
+                    "full_name": { "type": "string" },
+                    "description": { "type": ["string", "null"] },
+                    "language": { "type": ["string", "null"] },
+                    "topics": { "type": "array", "items": { "type": "string" } },
+                    "used_repositories": { "type": "array", "items": { "type": "string" }, "description": "Explicit owner/repo names to exclude; dependencies are not inferred" }
+                }
+            },
+            "exclude_full_names": { "type": "array", "items": { "type": "string" } },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
         }
     })
 }

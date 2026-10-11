@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `discover for-project` and `discover_starred_for_project` rank local stars against an explicit project context or need, with field-level match evidence and exclusions for the project itself and already-used repositories. Ranking does not use star popularity and makes no network or LLM requests.
+- `--data-dir` / `GITSEEK_DATA_DIR` overrides CLI storage for isolated local evaluations.
+
 ## 0.1.1 - 2026-06-16
 
 ### Fixed

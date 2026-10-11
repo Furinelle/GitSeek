@@ -1,9 +1,11 @@
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::{
     Config, GitSeek,
-    model::{ProfileDiscoveryRequest, SearchRequest},
+    model::{ProfileDiscoveryRequest, ProjectContext, ProjectFitRequest, SearchRequest},
     service::repository_context,
 };
 
@@ -14,6 +16,9 @@ use crate::{
     about = "Agent-first GitHub discovery MCP server"
 )]
 pub struct Cli {
+    /// Override local storage, for example for an isolated offline evaluation.
+    #[arg(long, global = true, env = "GITSEEK_DATA_DIR")]
+    data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -54,6 +59,20 @@ enum SearchCommand {
 #[derive(Debug, Subcommand)]
 enum DiscoverCommand {
     FromStars(ProfileDiscoveryArgs),
+    /// Rank locally starred tools for a project or a short description of a need.
+    ForProject(ProjectFitArgs),
+}
+
+#[derive(Debug, Args)]
+struct ProjectFitArgs {
+    target: String,
+    /// JSON project metadata; GitSeek reads only this file, never the project directory.
+    #[arg(long)]
+    context: Option<PathBuf>,
+    #[arg(long = "exclude")]
+    exclude_full_names: Vec<String>,
+    #[arg(long)]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -137,7 +156,10 @@ impl From<ProfileDiscoveryArgs> for ProfileDiscoveryRequest {
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let config = Config::load()?;
+    let mut config = Config::load()?;
+    if let Some(data_dir) = cli.data_dir {
+        config.data_dir = data_dir;
+    }
     let gitseek = GitSeek::open(config)?;
 
     match cli.command {
@@ -167,6 +189,26 @@ pub async fn run() -> Result<()> {
         Command::Discover { command } => match command {
             DiscoverCommand::FromStars(args) => {
                 let response = gitseek.discover_from_starred_profile(args.into()).await?;
+                print_json(&response)
+            }
+            DiscoverCommand::ForProject(args) => {
+                let context = args
+                    .context
+                    .map(|path| -> Result<ProjectContext> {
+                        let raw = std::fs::read_to_string(&path).with_context(|| {
+                            format!("failed to read project context {}", path.display())
+                        })?;
+                        serde_json::from_str(&raw).with_context(|| {
+                            format!("invalid project context JSON {}", path.display())
+                        })
+                    })
+                    .transpose()?;
+                let response = gitseek.discover_starred_for_project(ProjectFitRequest {
+                    target: args.target,
+                    context,
+                    exclude_full_names: args.exclude_full_names,
+                    limit: args.limit,
+                })?;
                 print_json(&response)
             }
         },

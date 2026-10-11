@@ -4,13 +4,15 @@ pub mod github;
 pub mod index;
 pub mod mcp;
 pub mod model;
+mod project_fit;
 pub mod router;
 pub mod service;
 pub mod storage;
 
 pub use config::Config;
 pub use model::{
-    ProfileDiscoveryRequest, RepositoryResult, RepositorySource, Routing, SearchMode,
-    SearchRequest, SearchResponse, StarredRepositoryProfile,
+    ProfileDiscoveryRequest, ProjectContext, ProjectFitRequest, ProjectFitResponse,
+    RepositoryResult, RepositorySource, Routing, SearchMode, SearchRequest, SearchResponse,
+    StarredRepositoryProfile,
 };
 pub use service::GitSeek;
