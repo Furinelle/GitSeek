@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -136,6 +136,32 @@ impl RepositoryStore {
         let rows = stmt.query_map([], row_to_repo)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to collect starred repository rows")
+    }
+
+    pub fn apply_starred_snapshot(
+        &self,
+        repos: &[RepositoryRecord],
+        complete: bool,
+    ) -> Result<(usize, usize)> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let mut removed = 0;
+        if complete {
+            let ids: HashSet<_> = repos.iter().map(|repo| repo.github_id).collect();
+            for repo in self.all_starred()? {
+                if !ids.contains(&repo.github_id) {
+                    removed += self.conn.execute(
+                        "DELETE FROM repositories WHERE github_id=?1 AND source='starred'",
+                        [repo.github_id],
+                    )?;
+                }
+            }
+        }
+        let mut updated = 0;
+        for repo in repos {
+            updated += usize::from(self.upsert_repository(repo)?);
+        }
+        transaction.commit()?;
+        Ok((updated, removed))
     }
 
     pub fn find_by_full_names(&self, full_names: &[String]) -> Result<Vec<RepositoryRecord>> {
@@ -327,6 +353,89 @@ mod tests {
         let starred = store.all_starred().unwrap();
         assert_eq!(starred.len(), 1);
         assert_eq!(starred[0].full_name, "modelcontextprotocol/rust-sdk");
+    }
+
+    #[test]
+    fn snapshot_upserts_and_pruning_roll_back_together_on_write_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RepositoryStore::open(&temp.path().join("gitseek.sqlite3")).unwrap();
+        let original = fixture_repo();
+        store.upsert_repository(&original).unwrap();
+        let mut updated = original.clone();
+        updated.description = Some("changed".into());
+        let mut new = original.clone();
+        new.github_id = 2;
+        new.full_name = "owner/new".into();
+        store.conn.execute_batch("CREATE TRIGGER fail_insert BEFORE INSERT ON repositories WHEN NEW.github_id=2 BEGIN SELECT RAISE(ABORT,'test write failure'); END;").unwrap();
+        assert!(store.apply_starred_snapshot(&[updated, new], true).is_err());
+        assert_eq!(store.all_starred().unwrap(), vec![original.clone()]);
+        store.conn.execute_batch("DROP TRIGGER fail_insert; CREATE TRIGGER fail_prune BEFORE DELETE ON repositories BEGIN SELECT RAISE(ABORT,'test prune failure'); END;").unwrap();
+        let mut new = original.clone();
+        new.github_id = 2;
+        new.full_name = "owner/new".into();
+        assert!(store.apply_starred_snapshot(&[new], true).is_err());
+        assert_eq!(store.all_starred().unwrap(), vec![original]);
+    }
+
+    #[test]
+    fn complete_snapshot_reuses_unstarred_name_and_rolls_back_on_later_upsert_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RepositoryStore::open(&temp.path().join("gitseek.sqlite3")).unwrap();
+        let original = fixture_repo();
+        store.upsert_repository(&original).unwrap();
+        let mut replacement = original.clone();
+        replacement.github_id = 2;
+        assert!(
+            store
+                .apply_starred_snapshot(&[replacement.clone()], false)
+                .is_err()
+        );
+        assert_eq!(store.all_starred().unwrap(), vec![original.clone()]);
+        store.conn.execute_batch("CREATE TRIGGER fail_replacement BEFORE INSERT ON repositories WHEN NEW.github_id=2 BEGIN SELECT RAISE(ABORT,'test replacement failure'); END;").unwrap();
+        assert!(
+            store
+                .apply_starred_snapshot(&[replacement.clone()], true)
+                .is_err()
+        );
+        assert_eq!(store.all_starred().unwrap(), vec![original]);
+        store
+            .conn
+            .execute_batch("DROP TRIGGER fail_replacement;")
+            .unwrap();
+        assert_eq!(
+            store
+                .apply_starred_snapshot(&[replacement.clone()], true)
+                .unwrap(),
+            (1, 1)
+        );
+        assert_eq!(store.all_starred().unwrap(), vec![replacement]);
+    }
+
+    #[test]
+    fn complete_empty_snapshot_clears_only_starred_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RepositoryStore::open(&temp.path().join("gitseek.sqlite3")).unwrap();
+        store.upsert_repository(&fixture_repo()).unwrap();
+        let mut github = fixture_repo();
+        github.github_id = 2;
+        github.full_name = "owner/github".into();
+        github.source = RepositorySource::Github;
+        store.upsert_repository(&github).unwrap();
+        assert_eq!(store.apply_starred_snapshot(&[], false).unwrap(), (0, 0));
+        assert_eq!(store.all_starred().unwrap().len(), 1);
+        assert_eq!(store.apply_starred_snapshot(&[], true).unwrap(), (0, 1));
+        assert!(store.all_starred().unwrap().is_empty());
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM repositories WHERE source='github'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
     }
 
     fn fixture_repo() -> RepositoryRecord {

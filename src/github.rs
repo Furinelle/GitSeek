@@ -11,6 +11,7 @@ use crate::model::{RepositoryRecord, RepositoryResult, RepositorySource};
 pub struct GitHubClient {
     http: reqwest::Client,
     token: Option<String>,
+    api_base: String,
 }
 
 impl GitHubClient {
@@ -20,7 +21,11 @@ impl GitHubClient {
             .default_headers(default_headers(token.as_deref())?)
             .build()
             .context("failed to build GitHub HTTP client")?;
-        Ok(Self { http, token })
+        Ok(Self {
+            http,
+            token,
+            api_base: "https://api.github.com".into(),
+        })
     }
 
     pub fn has_token(&self) -> bool {
@@ -40,7 +45,8 @@ impl GitHubClient {
         let mut repos = Vec::new();
         loop {
             let url = format!(
-                "https://api.github.com/user/starred?sort=created&direction=desc&per_page=100&page={page}"
+                "{}/user/starred?sort=created&direction=desc&per_page=100&page={page}",
+                self.api_base
             );
             let page_items: Vec<GitHubStarredRepo> = self
                 .http
@@ -104,7 +110,8 @@ impl GitHubClient {
 
         let sort = sort.unwrap_or("stars");
         let url = format!(
-            "https://api.github.com/search/repositories?q={}&sort={}&per_page={}",
+            "{}/search/repositories?q={}&sort={}&per_page={}",
+            self.api_base,
             urlencoding::encode(&q),
             urlencoding::encode(sort),
             limit.min(50)
@@ -130,16 +137,17 @@ impl GitHubClient {
     }
 
     async fn readme_excerpt(&self, full_name: &str) -> Result<String> {
-        let url = format!("https://api.github.com/repos/{full_name}/readme");
-        let response: GitHubReadme = self
+        let url = format!("{}/repos/{full_name}/readme", self.api_base);
+        let response = self
             .http
             .get(url)
+            .header(ACCEPT, "application/vnd.github.raw+json")
             .send()
             .await?
             .error_for_status()?
-            .json()
+            .text()
             .await?;
-        Ok(response.content.chars().take(12_000).collect())
+        Ok(response.chars().take(12_000).collect())
     }
 }
 
@@ -161,11 +169,6 @@ fn default_headers(token: Option<&str>) -> Result<HeaderMap> {
 #[derive(Debug, Deserialize)]
 struct GitHubSearchResponse {
     items: Vec<GitHubRepo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubReadme {
-    content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,4 +250,81 @@ struct GitHubOwner {
 #[derive(Debug, Deserialize)]
 struct GitHubLicense {
     spdx_id: String,
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        thread,
+    };
+
+    pub(crate) fn mock_github(
+        responses: Vec<(u16, String)>,
+    ) -> (GitHubClient, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&stream);
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    request.push_str(&line);
+                }
+                requests.push(request);
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .default_headers(default_headers(Some("test-token")).unwrap())
+            .build()
+            .unwrap();
+        (
+            GitHubClient {
+                http,
+                token: Some("test-token".into()),
+                api_base,
+            },
+            server,
+        )
+    }
+
+    pub(crate) fn starred(id: i64, name: &str) -> serde_json::Value {
+        json!({"starred_at":"2026-10-01T00:00:00Z", "repo":{
+            "id":id,"name":name,"full_name":format!("owner/{name}"),
+            "html_url":format!("https://github.com/owner/{name}"),"owner":{"login":"owner"},
+            "stargazers_count":1,"forks_count":0,"watchers_count":1,
+        }})
+    }
+
+    #[tokio::test]
+    async fn readme_requests_raw_text_and_truncates_unicode_characters() {
+        let readme = format!("# Actual README\n{}END", "中文🚀".repeat(5_000));
+        let (client, server) = mock_github(vec![(200, readme.clone())]);
+        let excerpt = client.readme_excerpt("owner/tool").await.unwrap();
+        assert_eq!(excerpt, readme.chars().take(12_000).collect::<String>());
+        assert_eq!(excerpt.chars().count(), 12_000);
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /repos/owner/tool/readme "));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("accept: application/vnd.github.raw+json\r\n")
+        );
+    }
 }

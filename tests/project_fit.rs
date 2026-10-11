@@ -61,6 +61,36 @@ fn command(temp: &tempfile::TempDir) -> Command {
 }
 
 #[test]
+fn cli_ignores_stale_tantivy_snapshot_after_sqlite_changes() {
+    let temp = fixture();
+    let store = RepositoryStore::open(&temp.path().join("gitseek.sqlite3")).unwrap();
+    let old = store.all_starred().unwrap();
+    let index = gitseek::index::SearchIndex::open_or_create(&temp.path().join("tantivy")).unwrap();
+    index.rebuild(&old).unwrap();
+    let mut replacement = old[0].clone();
+    replacement.github_id = 2;
+    replacement.full_name = "tools/archive".into();
+    replacement.name = "archive".into();
+    replacement.description = Some("Archive tools".into());
+    replacement.topics = vec!["archive".into()];
+    store.apply_starred_snapshot(&[replacement], true).unwrap();
+    for (args, expected) in [
+        (vec!["search", "stars", "telegram"], 0),
+        (vec!["search", "stars", "archive"], 1),
+        (vec!["discover", "for-project", "telegram"], 0),
+    ] {
+        let output = command(&temp).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["matches"].as_array().unwrap().len(), expected);
+    }
+}
+
+#[test]
 fn cli_reads_explicit_context_and_searches_without_a_tantivy_rebuild() {
     let temp = fixture();
     let context = temp.path().join("project.json");

@@ -88,6 +88,24 @@ gitseek context modelcontextprotocol/rust-sdk
 Run `gitseek sync stars` after upgrading from versions before `0.1.1` so the
 local SQLite store contains GitHub's real `starred_at` timestamps.
 
+An unlimited, successful sync treats GitHub's complete starred list as a snapshot:
+repositories you unstarred are removed locally, including from project discovery.
+`--limit` syncs only add or update the returned repositories and never remove unseen
+stars. Failed or interrupted list fetches leave the previous snapshot intact; all
+SQLite removals and upserts commit in one transaction. Complete syncs remove unseen
+old IDs first, so a new repository can reuse an unstarred repository's old name;
+any subsequent write failure restores the whole previous snapshot. Limited syncs
+preserve old IDs and report such name conflicts without changing the snapshot.
+An empty complete list clears
+the local stars. README excerpts use GitHub's raw text response and keep up to 12,000
+Unicode characters; the default sync refreshes older encoded excerpts.
+
+The Tantivy commit records a fingerprint of the SQLite snapshot. If rebuilding the
+index fails after SQLite commits, sync returns an error and local search falls back
+to SQLite, including after restart. It uses the existing literal substring search
+until the next successful sync rebuilds Tantivy. Older indexes without a fingerprint
+also use this fallback; run `gitseek sync stars` to restore full-text relevance.
+
 ### Find a use for tools you already starred
 
 `discover for-project` runs entirely locally after stars have been synced. Pass
