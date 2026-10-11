@@ -144,10 +144,6 @@ impl RepositoryStore {
         complete: bool,
     ) -> Result<(usize, usize)> {
         let transaction = self.conn.unchecked_transaction()?;
-        let mut updated = 0;
-        for repo in repos {
-            updated += usize::from(self.upsert_repository(repo)?);
-        }
         let mut removed = 0;
         if complete {
             let ids: HashSet<_> = repos.iter().map(|repo| repo.github_id).collect();
@@ -159,6 +155,10 @@ impl RepositoryStore {
                     )?;
                 }
             }
+        }
+        let mut updated = 0;
+        for repo in repos {
+            updated += usize::from(self.upsert_repository(repo)?);
         }
         transaction.commit()?;
         Ok((updated, removed))
@@ -375,6 +375,40 @@ mod tests {
         new.full_name = "owner/new".into();
         assert!(store.apply_starred_snapshot(&[new], true).is_err());
         assert_eq!(store.all_starred().unwrap(), vec![original]);
+    }
+
+    #[test]
+    fn complete_snapshot_reuses_unstarred_name_and_rolls_back_on_later_upsert_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RepositoryStore::open(&temp.path().join("gitseek.sqlite3")).unwrap();
+        let original = fixture_repo();
+        store.upsert_repository(&original).unwrap();
+        let mut replacement = original.clone();
+        replacement.github_id = 2;
+        assert!(
+            store
+                .apply_starred_snapshot(&[replacement.clone()], false)
+                .is_err()
+        );
+        assert_eq!(store.all_starred().unwrap(), vec![original.clone()]);
+        store.conn.execute_batch("CREATE TRIGGER fail_replacement BEFORE INSERT ON repositories WHEN NEW.github_id=2 BEGIN SELECT RAISE(ABORT,'test replacement failure'); END;").unwrap();
+        assert!(
+            store
+                .apply_starred_snapshot(&[replacement.clone()], true)
+                .is_err()
+        );
+        assert_eq!(store.all_starred().unwrap(), vec![original]);
+        store
+            .conn
+            .execute_batch("DROP TRIGGER fail_replacement;")
+            .unwrap();
+        assert_eq!(
+            store
+                .apply_starred_snapshot(&[replacement.clone()], true)
+                .unwrap(),
+            (1, 1)
+        );
+        assert_eq!(store.all_starred().unwrap(), vec![replacement]);
     }
 
     #[test]

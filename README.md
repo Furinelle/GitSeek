@@ -92,7 +92,11 @@ An unlimited, successful sync treats GitHub's complete starred list as a snapsho
 repositories you unstarred are removed locally, including from project discovery.
 `--limit` syncs only add or update the returned repositories and never remove unseen
 stars. Failed or interrupted list fetches leave the previous snapshot intact; all
-SQLite upserts and removals commit in one transaction. An empty complete list clears
+SQLite removals and upserts commit in one transaction. Complete syncs remove unseen
+old IDs first, so a new repository can reuse an unstarred repository's old name;
+any subsequent write failure restores the whole previous snapshot. Limited syncs
+preserve old IDs and report such name conflicts without changing the snapshot.
+An empty complete list clears
 the local stars. README excerpts use GitHub's raw text response and keep up to 12,000
 Unicode characters; the default sync refreshes older encoded excerpts.
 
