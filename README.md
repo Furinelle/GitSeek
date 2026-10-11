@@ -47,6 +47,13 @@ Set a GitHub token before syncing starred repositories or searching GitHub-wide 
 export GITHUB_TOKEN=ghp_your_token
 ```
 
+For a one-off sync with the account already authenticated in GitHub CLI, without
+saving the token:
+
+```bash
+GITHUB_TOKEN="$(gh auth token --hostname github.com)" gitseek sync stars
+```
+
 For local use, create an ignored `.env`:
 
 ```bash
@@ -59,7 +66,10 @@ For MCP hosts that launch GitSeek outside the project directory, set:
 GITSEEK_ENV_FILE=/absolute/path/to/GitSeek/.env
 ```
 
-GitSeek also reads `~/.config/gitseek/config.toml` when present.
+GitSeek reads `config.toml` from the platform config directory when present:
+
+- Linux: `~/.config/gitseek/config.toml`
+- macOS: `~/Library/Application Support/gitseek/config.toml`
 
 ## CLI
 
