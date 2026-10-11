@@ -200,6 +200,24 @@ cargo build --release
 
 ## Notes
 
-Tantivy is currently pinned to `=0.25.0`, with `time = 0.3.37`, because newer
-`time` versions can trigger an upstream compile conflict in `tantivy-common`
-on the current Rust toolchain.
+Tantivy remains pinned to `=0.25.0`. The direct `time` dependency controls
+Tantivy's transitive version; GitSeek does not call it directly. Its original
+`=0.3.37` pin worked around a `tantivy-common` compile conflict. The pin is now
+`=0.3.47`, which fixes [RUSTSEC-2026-0009](https://rustsec.org/advisories/RUSTSEC-2026-0009.html)
+and passes the existing tests and release build on Rust 1.95. `time` 0.3.47
+requires Rust 1.88 or newer; the full project has not been tested on that minimum.
+
+The lockfile also includes the compatible security patches `rustls` 0.23.45,
+`anyhow` 1.0.103, `crossbeam-epoch` 0.9.20, and `memmap2` 0.9.11. `rustls`
+is part of the active reqwest TLS path. OSV reported no advisories for the ten
+changed package versions on 2026-10-12; this is not a clean bill for the whole lockfile.
+
+Tantivy still requires `lru` 0.12.5, which has unresolved
+[iterator](https://rustsec.org/advisories/RUSTSEC-2026-0002.html) and
+[panic-safety](https://rustsec.org/advisories/RUSTSEC-2026-0253.html) advisories.
+Its current [store cache](https://github.com/quickwit-oss/tantivy/blob/0.25.0/src/store/reader.rs)
+uses `LruCache<usize, Block>` with `get`/`put`/`len`, not `iter_mut` or `pop`,
+and its integer keys have no panicking destructor. Those specific trigger paths
+were not found; the affected dependency remains, pending a separate Tantivy upgrade.
+`quinn-proto` 0.11.14 is also retained in the lockfile with advisories, but does
+not appear in `cargo tree -i quinn-proto --target all` for the enabled features.
