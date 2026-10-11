@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::Path,
+};
 
 use anyhow::{Context, Result};
 use tantivy::{
@@ -56,8 +60,15 @@ impl SearchIndex {
                 self.readme => repo.readme.as_deref().unwrap_or_default(),
             ))?;
         }
-        writer.commit()?;
+        let mut commit = writer.prepare_commit()?;
+        commit.set_payload(&snapshot_fingerprint(repos)?);
+        commit.commit()?;
         Ok(())
+    }
+
+    pub fn matches_snapshot(&self, repos: &[RepositoryRecord]) -> Result<bool> {
+        Ok(self.index.load_metas()?.payload.as_deref()
+            == Some(snapshot_fingerprint(repos)?.as_str()))
     }
 
     pub fn search_full_names(&self, query: &str, limit: usize) -> Result<Vec<String>> {
@@ -92,6 +103,14 @@ impl SearchIndex {
             })
             .collect()
     }
+}
+
+fn snapshot_fingerprint(repos: &[RepositoryRecord]) -> Result<String> {
+    let mut sorted: Vec<_> = repos.iter().collect();
+    sorted.sort_by_key(|repo| repo.github_id);
+    let mut hasher = DefaultHasher::new();
+    serde_json::to_vec(&sorted)?.hash(&mut hasher);
+    Ok(format!("gitseek-starred-v1-{:016x}", hasher.finish()))
 }
 
 fn build_schema() -> Schema {

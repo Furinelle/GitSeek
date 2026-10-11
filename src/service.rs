@@ -61,18 +61,14 @@ impl GitSeek {
             .github
             .starred_repositories(include_readme || force, limit)
             .await?;
-        let mut updated_count = 0;
-        for repo in &repos {
-            if self.store.upsert_repository(repo)? {
-                updated_count += 1;
-            }
-        }
+        let (updated_count, removed_count) =
+            self.store.apply_starred_snapshot(&repos, limit.is_none())?;
         let starred = self.store.all_starred()?;
-        self.index.rebuild(&starred)?;
+        self.index.rebuild(&starred).context("starred snapshot saved, but search index rebuild failed; local search will use SQLite until the next successful sync")?;
         Ok(SyncReport {
             synced_count: repos.len(),
             updated_count,
-            removed_count: 0,
+            removed_count,
             errors: Vec::new(),
         })
     }
@@ -250,7 +246,13 @@ impl GitSeek {
         limit: usize,
     ) -> Result<Vec<RepositoryResult>> {
         let sort = normalize_starred_sort(request.sort.as_deref());
-        let repos = if sort == StarredSort::Relevance {
+        // A failed rebuild must not serve results from a different SQLite snapshot.
+        let repos = if sort == StarredSort::Relevance
+            && self
+                .index
+                .matches_snapshot(&self.store.all_starred()?)
+                .unwrap_or(false)
+        {
             let full_names = self
                 .index
                 .search_full_names(&request.query, limit)
@@ -268,6 +270,7 @@ impl GitSeek {
 
         let mut repos = repos
             .into_iter()
+            .filter(|repo| repo.source == RepositorySource::Starred)
             .filter(|repo| {
                 request.language.as_ref().is_none_or(|language| {
                     repo.language
@@ -578,6 +581,234 @@ fn profile_why_matched(
 mod tests {
     use super::*;
     use crate::model::RepositorySource;
+
+    fn sync_fixture(path: &std::path::Path) -> GitSeek {
+        GitSeek::open(Config {
+            data_dir: path.to_owned(),
+            github_token: None,
+            default_limit: 10,
+            github_cache_ttl: Duration::from_secs(60),
+            include_readme: false,
+        })
+        .unwrap()
+    }
+
+    fn local_matches(service: &GitSeek, query: &str) -> Vec<RepositoryResult> {
+        service
+            .search_starred_matches(
+                &serde_json::from_value(serde_json::json!({"query":query})).unwrap(),
+                10,
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn synced_readme_text_is_searchable_and_used_by_project_discovery() {
+        use crate::github::tests::{mock_github, starred};
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = sync_fixture(temp.path());
+        let readme = "# Tool\nquartzneedle 中文🚀";
+        let (client, server) = mock_github(vec![
+            (200, serde_json::json!([starred(1, "tool")]).to_string()),
+            (200, readme.into()),
+            (200, "[]".into()),
+        ]);
+        service.github = client;
+        service.sync_starred(false, Some(true), None).await.unwrap();
+        assert_eq!(server.join().unwrap().len(), 3);
+        assert_eq!(
+            service.store.all_starred().unwrap()[0].readme.as_deref(),
+            Some(readme)
+        );
+        assert_eq!(
+            local_matches(&service, "quartzneedle")[0].full_name,
+            "owner/tool"
+        );
+        let fit = service
+            .discover_starred_for_project(
+                serde_json::from_value(serde_json::json!({"target":"quartzneedle"})).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(fit.matches[0].repository.full_name, "owner/tool");
+        assert!(
+            fit.matches[0]
+                .repository
+                .why_matched
+                .iter()
+                .any(|reason| reason.contains("README"))
+        );
+    }
+
+    #[tokio::test]
+    async fn full_sync_removes_unstarred_from_search_and_project_fit_then_accepts_empty() {
+        use crate::github::tests::{mock_github, starred};
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = sync_fixture(temp.path());
+        let removed = fixture_repo("owner/removed", None, &["telegram"]);
+        service.store.upsert_repository(&removed).unwrap();
+        service.index.rebuild(&[removed]).unwrap();
+        assert_eq!(local_matches(&service, "telegram").len(), 1);
+        let (client, server) = mock_github(vec![
+            (200, serde_json::json!([starred(2, "kept")]).to_string()),
+            (200, "[]".into()),
+        ]);
+        service.github = client;
+        let report = service
+            .sync_starred(false, Some(false), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                report.synced_count,
+                report.updated_count,
+                report.removed_count
+            ),
+            (1, 1, 1)
+        );
+        server.join().unwrap();
+        assert!(local_matches(&service, "telegram").is_empty());
+        let fit = service
+            .discover_starred_for_project(
+                serde_json::from_value(serde_json::json!({"target":"telegram"})).unwrap(),
+            )
+            .unwrap();
+        assert!(fit.matches.is_empty());
+        assert_eq!(fit.starred_count, 1);
+        let (client, server) = mock_github(vec![(200, "[]".into())]);
+        service.github = client;
+        assert_eq!(
+            service
+                .sync_starred(false, Some(false), None)
+                .await
+                .unwrap()
+                .removed_count,
+            1
+        );
+        server.join().unwrap();
+        assert!(service.store.all_starred().unwrap().is_empty());
+        assert!(local_matches(&service, "kept").is_empty());
+    }
+
+    #[tokio::test]
+    async fn limited_sync_and_failed_later_pages_preserve_unseen_stars() {
+        use crate::github::tests::{mock_github, starred};
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = sync_fixture(temp.path());
+        let old = fixture_repo("owner/old", None, &["telegram"]);
+        service.store.upsert_repository(&old).unwrap();
+        let page = serde_json::json!([starred(2, "new"), starred(3, "unfetched")]).to_string();
+        let (client, server) = mock_github(vec![(200, page)]);
+        service.github = client;
+        let report = service
+            .sync_starred(false, Some(false), Some(1))
+            .await
+            .unwrap();
+        assert_eq!((report.synced_count, report.removed_count), (1, 0));
+        server.join().unwrap();
+        assert_eq!(service.store.all_starred().unwrap().len(), 2);
+        let before = service.store.all_starred().unwrap();
+        for (status, body) in [(403, "denied"), (200, "truncated JSON")] {
+            let (client, server) = mock_github(vec![
+                (200, serde_json::json!([starred(4, "partial")]).to_string()),
+                (status, body.into()),
+            ]);
+            service.github = client;
+            assert!(
+                service
+                    .sync_starred(false, Some(false), None)
+                    .await
+                    .is_err()
+            );
+            server.join().unwrap();
+            assert_eq!(service.store.all_starred().unwrap(), before);
+        }
+        let (client, server) = mock_github(vec![(200, "[]".into())]);
+        service.github = client;
+        assert_eq!(
+            service
+                .sync_starred(false, Some(false), Some(100))
+                .await
+                .unwrap()
+                .removed_count,
+            0
+        );
+        server.join().unwrap();
+        assert_eq!(service.store.all_starred().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn index_rebuild_failure_uses_current_sqlite_snapshot_across_reopen() {
+        use crate::github::tests::{mock_github, starred};
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = sync_fixture(temp.path());
+        let old = fixture_repo("owner/kept", None, &["oldterm"]);
+        let mut removed = fixture_repo("owner/removed", None, &["telegram"]);
+        removed.github_id = 3;
+        for repo in [&old, &removed] {
+            service.store.upsert_repository(repo).unwrap();
+        }
+        service.index.rebuild(&[old, removed]).unwrap();
+        let index = tantivy::Index::open_in_dir(service.config.index_dir()).unwrap();
+        let writer = index
+            .writer::<tantivy::TantivyDocument>(50_000_000)
+            .unwrap();
+        let mut kept = starred(1, "kept");
+        kept["repo"]["description"] = "newterm".into();
+        let page = serde_json::json!([kept, starred(2, "new")]).to_string();
+        let (client, server) = mock_github(vec![(200, page.clone()), (200, "[]".into())]);
+        service.github = client;
+        assert!(
+            service
+                .sync_starred(false, Some(false), None)
+                .await
+                .is_err()
+        );
+        server.join().unwrap();
+        drop(service);
+        let mut service = sync_fixture(temp.path());
+        assert!(
+            !service
+                .index
+                .matches_snapshot(&service.store.all_starred().unwrap())
+                .unwrap()
+        );
+        assert!(local_matches(&service, "oldterm").is_empty());
+        assert!(local_matches(&service, "telegram").is_empty());
+        assert_eq!(
+            local_matches(&service, "newterm")[0].full_name,
+            "owner/kept"
+        );
+        assert!(
+            local_matches(&service, "new")
+                .iter()
+                .any(|repo| repo.full_name == "owner/new")
+        );
+        let fit = service
+            .discover_starred_for_project(
+                serde_json::from_value(serde_json::json!({"target":"telegram"})).unwrap(),
+            )
+            .unwrap();
+        assert!(fit.matches.is_empty());
+        drop(writer);
+        let (client, server) = mock_github(vec![(200, page), (200, "[]".into())]);
+        service.github = client;
+        service
+            .sync_starred(false, Some(false), None)
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert!(
+            service
+                .index
+                .matches_snapshot(&service.store.all_starred().unwrap())
+                .unwrap()
+        );
+        assert!(local_matches(&service, "oldterm").is_empty());
+        assert_eq!(
+            local_matches(&service, "newterm")[0].full_name,
+            "owner/kept"
+        );
+    }
 
     #[test]
     fn grouped_response_preserves_sources_and_cache_as_separate_fields() {
