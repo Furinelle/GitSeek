@@ -81,6 +81,45 @@ impl ProfileDiscoveryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectContext {
+    pub full_name: String,
+    pub description: Option<String>,
+    pub language: Option<String>,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub used_repositories: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectFitRequest {
+    pub target: String,
+    pub context: Option<ProjectContext>,
+    #[serde(default)]
+    pub exclude_full_names: Vec<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectFitMatch {
+    pub relevance_score: u64,
+    #[serde(flatten)]
+    pub repository: RepositoryResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectFitResponse {
+    pub target: String,
+    pub context: Option<ProjectContext>,
+    pub query_terms: Vec<String>,
+    pub purpose_terms: Vec<String>,
+    pub starred_count: usize,
+    pub excluded_count: usize,
+    pub matches: Vec<ProjectFitMatch>,
+    pub limitation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileSignal {
     pub value: String,
     pub count: usize,

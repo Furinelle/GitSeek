@@ -14,6 +14,7 @@ GitSeek keeps search source and cache state separate:
 - `search_github_repositories` searches only GitHub-wide repositories.
 - `recommend_repositories` searches starred repositories first, then GitHub-wide repositories as a grouped supplement.
 - `discover_repositories_from_starred_profile` builds an interest profile from local stars, then searches GitHub-wide high-star repositories.
+- `discover_starred_for_project` ranks only local stars for a project or a specific need, with explicit match evidence and exclusions.
 - Result `source` is only `starred` or `github`.
 - `cache_hit` is an implementation detail and is tracked separately from `source`.
 
@@ -71,6 +72,8 @@ gitseek search stars "rust" --sort starred_at
 gitseek search github "rust mcp server"
 gitseek recommend "find rust mcp server examples"
 gitseek discover from-stars --min-stars 5000 --limit 10
+gitseek discover for-project "Telegram folder search" --limit 5
+gitseek discover for-project user/my-bot --context project.json --exclude teloxide/teloxide
 gitseek context modelcontextprotocol/rust-sdk
 ```
 
@@ -85,6 +88,52 @@ gitseek context modelcontextprotocol/rust-sdk
 Run `gitseek sync stars` after upgrading from versions before `0.1.1` so the
 local SQLite store contains GitHub's real `starred_at` timestamps.
 
+### Find a use for tools you already starred
+
+`discover for-project` runs entirely locally after stars have been synced. Pass
+a short need, or supply project metadata in a JSON file:
+
+```json
+{
+  "full_name": "user/my-bot",
+  "description": "Private Telegram folder search bot with caching",
+  "language": "Rust",
+  "topics": ["telegram", "search"],
+  "used_repositories": ["teloxide/teloxide"]
+}
+```
+
+GitSeek reads only the explicitly supplied JSON file, never a project directory
+or its manifests. `owner/repo` targets without `--context` resolve only when the
+target is itself in the local starred store; otherwise describe the need or
+provide context. The target must match `context.full_name` when using `owner/repo`.
+The target itself, `used_repositories`, and `--exclude` names are excluded without
+regard to case. Dependency names must be supplied explicitly as `owner/repo`;
+package names are not automatically mapped to GitHub repositories.
+
+Every match has `source: "starred"`, a `relevance_score`, and `why_matched`
+listing the exact terms found in each field. Ranking weights topics (4), name
+(3), description (2), and cached README (1), with rarer terms weighted more.
+`purpose_terms` come from the short need, the project's first description sentence,
+and explicit topics; these terms get three times the weight of later context.
+The score is then multiplied by the number of distinct matched purpose terms
+(at least one), so a single rare ambiguous word does not dominate broader fit.
+Star counts never affect ranking. The context's implementation language is
+removed from query terms and only adds a supporting tie-break point to existing
+matches. No functional term match means no candidate.
+
+This is lexical discovery, not an integration or quality assessment: no synonym
+translation, stemming, or Chinese word segmentation is performed. Use concise
+keywords present in your stars' metadata; missing metadata can hide useful tools.
+Project-description sentences with explicit English negative requirements such
+as "do not require" or "does not use" are omitted so those dependencies do not
+become search needs. Other negation is not interpreted.
+Read each candidate's documentation and license before adopting it. No GitHub or
+LLM request is made, and the tool does not modify repositories or stored stars.
+
+To keep an evaluation separate from your regular database, all CLI commands
+accept `--data-dir /path/to/isolated-data` or `GITSEEK_DATA_DIR`.
+
 ## MCP Tools
 
 - `search_starred_repositories`
@@ -92,7 +141,11 @@ local SQLite store contains GitHub's real `starred_at` timestamps.
 - `recommend_repositories`
 - `sync_starred_repositories`
 - `discover_repositories_from_starred_profile`
+- `discover_starred_for_project`
 - `get_repository_context`
+
+The project discovery MCP tool accepts `target`, optional inline `context` with
+the same fields as the JSON above, `exclude_full_names`, and `limit` (1–50).
 
 Run the MCP stdio server:
 

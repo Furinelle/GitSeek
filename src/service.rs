@@ -11,9 +11,9 @@ use crate::{
     github::GitHubClient,
     index::SearchIndex,
     model::{
-        ProfileDiscoveryRequest, ProfileSignal, RepositoryRecord, RepositoryResult,
-        RepositorySource, Routing, SearchMode, SearchRequest, SearchResponse,
-        StarredRepositoryProfile, SyncReport,
+        ProfileDiscoveryRequest, ProfileSignal, ProjectFitRequest, ProjectFitResponse,
+        RepositoryRecord, RepositoryResult, RepositorySource, Routing, SearchMode, SearchRequest,
+        SearchResponse, StarredRepositoryProfile, SyncReport,
     },
     router::route_intent,
     storage::{RepositoryStore, StarredSort, normalize_starred_sort},
@@ -85,6 +85,14 @@ impl GitSeek {
         };
         let matches = self.search_starred_matches(&request, limit)?;
         Ok(SearchResponse::Single { routing, matches })
+    }
+
+    pub fn discover_starred_for_project(
+        &self,
+        request: ProjectFitRequest,
+    ) -> Result<ProjectFitResponse> {
+        let starred = self.store.all_starred()?;
+        crate::project_fit::discover(&starred, request, self.config.default_limit)
     }
 
     pub async fn search_github(&self, request: SearchRequest) -> Result<SearchResponse> {
